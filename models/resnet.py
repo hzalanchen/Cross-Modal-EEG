@@ -1,4 +1,3 @@
-# 解读pytorch官方对resnet的实现
 import torch
 import torch.nn as nn
 
@@ -19,20 +18,19 @@ model_urls = {
 }
 
 
-# 封装一个3*3的卷积函数
+
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                      padding=dilation, groups=groups, bias=False, dilation=dilation)
 
 
-# 封装一个1*1的卷积函数
+
 def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
-# 在这里定义了最重要的残差模块，这里是基础版适用于18和34层的，由两个3*3卷积组成
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -76,7 +74,6 @@ class BasicBlock(nn.Module):
         else:
             return out
 
-# 定义了50 101 152 等深层resnet的残差模块，由1*1，3*3 ，1*1的卷积堆叠而成
 class Bottleneck(nn.Module):
     # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
     # while original implementation places the stride at the first 1x1 convolution(self.conv1)
