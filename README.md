@@ -9,8 +9,8 @@
 
 
 # Dependencies
-- Python 3.10
-- torch 2.0.0
+- Python=3.10
+- torch=2.0.0
 
 
 # Run Code
@@ -29,8 +29,8 @@ python train_decouple.py --geo-loss True --lambda1 0.5
 
 
 ## Citation
-If you find the code useful please consider citing our paper
-```bibtex
+If you find the code useful please consider citing our paper:
+```
 @article{chen2024visual,
   title={Visual Neural Decoding via Improved Visual-EEG Semantic Consistency},
   author={Chen, Hongzhou and He, Lianghua and Liu, Yihang and Yang, Longzhen},
