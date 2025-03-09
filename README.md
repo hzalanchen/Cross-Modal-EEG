@@ -27,21 +27,17 @@ python train_decouple.py
 python train_decouple.py --geo-loss True --lambda1 0.5
 ```
 
-# Paper
+
+## Citation
 If you find the code useful please consider citing our paper
-'''
-@misc{chen2024visualneuraldecodingimproved,
-      title={Visual Neural Decoding via Improved Visual-EEG Semantic Consistency}, 
-      author={Hongzhou Chen and Lianghua He and Yihang Liu and Longzhen Yang},
-      year={2024},
-      eprint={2408.06788},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2408.06788}, 
+```bibtex
+@article{chen2024visual,
+  title={Visual Neural Decoding via Improved Visual-EEG Semantic Consistency},
+  author={Chen, Hongzhou and He, Lianghua and Liu, Yihang and Yang, Longzhen},
+  journal={arXiv preprint arXiv:2408.06788},
+  year={2024}
 }
-'''
-
-
+```
 
 
 
