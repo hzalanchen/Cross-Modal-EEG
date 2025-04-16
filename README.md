@@ -5,8 +5,6 @@
 <img src="fig/VE_SID.png" width="600" class="center">
 </p>
 
-# Prepare the data
-
 
 # Dependencies
 - Python=3.10
