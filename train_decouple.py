@@ -306,12 +306,7 @@ def main():
     opt = parse_args()
     num_sub = opt.num_sub
     setup_seed(opt.seed)
-    for i in range(1, 2):
-        if opt.exp_setting == 'intra-subject':
-            print(f'[Intra-Subject] Subject {i}, Seed is {opt.seed}')
-        elif opt.exp_setting == 'inter-subject':
-            print(f'[Inter-Subject LOSO] Test Subject {i}, Seed is {opt.seed}')
-        
+    for i in range(1, num_sub + 1):
         ie = VE_SID(opt, i)
         ie.loops()
 

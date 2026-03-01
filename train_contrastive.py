@@ -154,8 +154,6 @@ class VE_SID():
             }
 
             results.append(epoch_results)
-
-            # self.wandblogger.log_metrics(test_acc1 = test_top1_acc, test_acc5 = test_top5_acc, train_conloss = train_conloss, geo_loss = geo_loss)
             self.logger.info(f"Subject {self.nSub} : Epoch {epoch}, test_acc1 :{test_top1_acc}, test_acc5:{test_top5_acc}, train_conloss = {train_conloss}, geo_loss = {geo_loss}")
         
         # Test
@@ -180,7 +178,6 @@ class VE_SID():
             
         
         self.logger.handlers.clear()
-        # self.wandblogger.finish()
 
         # Save results to a CSV file
         train_rows = results[:-1]
@@ -269,7 +266,6 @@ class VE_SID():
             raise ValueError("No best-train-conloss state captured")
         
         self.logger.handlers.clear()
-        # self.wandblogger.finish()
         
         # Save results to a CSV file
         train_rows = results[:-1]
