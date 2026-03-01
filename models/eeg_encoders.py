@@ -133,13 +133,40 @@ class ShallowFBCSPNet_Encoder(nn.Module):
         return prediction
     
 # NICE
+# class PatchEmbedding_NICE(nn.Module):
+#     def __init__(self, emb_size=40):
+#         super().__init__()
+#         # revised from shallownet
+#         self.tsconv = nn.Sequential(
+#             nn.Conv2d(1, 40, (1, 25), (1, 1)),
+#             nn.AvgPool2d((1, 51), (1, 5)),
+#             nn.BatchNorm2d(40),
+#             nn.ELU(),
+#             nn.Conv2d(40, 40, (63, 1), (1, 1)),
+#             nn.BatchNorm2d(40),
+#             nn.ELU(),
+#             nn.Dropout(0.5),
+#         )
+
+#         self.projection = nn.Sequential(
+#             nn.Conv2d(40, emb_size, (1, 1), stride=(1, 1)),  
+#             Rearrange('b e (h) (w) -> b (h w) e'),
+#         )
+
+#     def forward(self, x):
+#         # b, _, _, _ = x.shape
+#         x = self.tsconv(x)
+#         x = self.projection(x)
+#         return x
+
+
 class PatchEmbedding_NICE(nn.Module):
-    def __init__(self, emb_size=40):
+    def __init__(self, emb_size=16): 
         super().__init__()
         # revised from shallownet
         self.tsconv = nn.Sequential(
             nn.Conv2d(1, 40, (1, 25), (1, 1)),
-            nn.AvgPool2d((1, 51), (1, 5)),
+            nn.AdaptiveAvgPool2d((63, 64)), # modified here to (63, 64), for dim 64 * 16 = 1024
             nn.BatchNorm2d(40),
             nn.ELU(),
             nn.Conv2d(40, 40, (63, 1), (1, 1)),
@@ -148,16 +175,17 @@ class PatchEmbedding_NICE(nn.Module):
             nn.Dropout(0.5),
         )
 
+        # To 1024 Dim
         self.projection = nn.Sequential(
             nn.Conv2d(40, emb_size, (1, 1), stride=(1, 1)),  
             Rearrange('b e (h) (w) -> b (h w) e'),
         )
 
     def forward(self, x):
-        # b, _, _, _ = x.shape
         x = self.tsconv(x)
         x = self.projection(x)
         return x
+
 
 
 class FlattenHead(nn.Sequential):
@@ -171,7 +199,7 @@ class FlattenHead(nn.Sequential):
 
 class NICE_Encoder(nn.Sequential):
     # input dim (bs,1,channel, time_point)
-    def __init__(self, emb_size=40, **kwargs):
+    def __init__(self, emb_size=16, **kwargs):
         super().__init__(
             PatchEmbedding_NICE(emb_size),
             FlattenHead()
@@ -224,41 +252,44 @@ class PositionalEncoding(nn.Module):
 
 
 class EEGAttention(nn.Module):
-    def __init__(self, channel, d_model, nhead):
+    def __init__(self, num_channels, sequence_length, nhead):
         super(EEGAttention, self).__init__()
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead)
-        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-        self.channel = channel
-        self.d_model = d_model
+
+        self.d_model = sequence_length
+        self.pos_embedding = nn.Parameter(torch.zeros(1, num_channels, self.d_model))
+
+        # iTransformer
+        self.encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.d_model, 
+            nhead=nhead,
+            dim_feedforward=self.d_model,
+            batch_first=True
+            )
+
+        self.transformer_encoder = nn.TransformerEncoder(
+            self.encoder_layer, 
+            num_layers=1
+        )
+
 
     def forward(self, src):
-        src = src.permute(2, 0, 1)  # Change shape to [time_length, batch_size, channel]
-        src = self.pos_encoder(src)
-        # print(src.shape)
+        # [BatchSize, channel, SequenceLength]
+        src = src + self.pos_embedding
         output = self.transformer_encoder(src)
-        return output.permute(1, 2, 0)  # Change shape back to [batch_size, channel, time_length]
+        return output
 
 
 class ATMS_Encoder(nn.Module):
     def __init__(self, num_channels=63, sequence_length=250, num_subjects=1, num_features=64, num_latents=1024, num_blocks=1):
         super(ATMS_Encoder, self).__init__()
-        self.attention_model = EEGAttention(num_channels, num_channels, nhead=1)   
-        self.subject_wise_linear = nn.ModuleList([nn.Linear(sequence_length, sequence_length) for _ in range(num_subjects)])
-        self.enc_eeg = NICE_Encoder()
-        # self.proj_eeg = Proj_eeg()        
-      
+        self.attention_model = EEGAttention(num_channels, sequence_length, nhead=1)   
+        self.enc_eeg = NICE_Encoder()   
          
     def forward(self, x):
-        x = x.squeeze()
-        x = self.attention_model(x)
-        # print(f'After attention shape: {x.shape}')
-         
-        x = self.subject_wise_linear[0](x)
-        # attention - input(bs, channel, time_point). after nice_encoder - input(bs, 1, channel, time_point)
-        x = x.unsqueeze(1)
-        eeg_embedding = self.enc_eeg(x)
-        # out = self.proj_eeg(eeg_embedding)
+        x = self.attention_model(x) # B C T
+
+        x = x.unsqueeze(1) # B 1 C T
+        eeg_embedding = self.enc_eeg(x) # B D 
         return eeg_embedding  
       
 
@@ -318,8 +349,3 @@ class ATME_Encoder(nn.Module):
         # out = self.proj_eeg(eeg_embedding)
         return eeg_embedding  
     
-
-# if __name__ == "__main__":
-#     testeeg = torch.randn(4, 63, 250)
-#     eegnet = ATMS_Encoder()
-#     print(eegnet(testeeg).shape)

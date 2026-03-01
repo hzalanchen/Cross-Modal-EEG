@@ -1,13 +1,98 @@
 import os 
 import torch
-import torch.nn.functional as F
 import random
 import numpy as np
 import wandb
 import shutil
 import logging
-from datetime import datetime
-from torch.optim.lr_scheduler import LambdaLR
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data.sampler import Sampler
+
+
+def compute_grad_norm(loss, model_params, name=""):
+    if loss is None or (isinstance(loss, (int, float)) and loss == 0):
+        return 0.0
+    if isinstance(loss, torch.Tensor) and loss.item() == 0:
+        return 0.0
+        
+
+    params = list(model_params)
+    if not params:
+        return 0.0
+
+    grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+    
+    valid_grads = [g.view(-1) for g in grads if g is not None]
+    
+    if not valid_grads:
+        return 0.0
+        
+    total_norm = torch.cat(valid_grads).norm(2).item()
+    return total_norm
+
+
+
+class MPerClassSampler(Sampler):
+    def __init__(self, labels, m_per_class, batch_size=None, length_before_new_iter=100000):
+        
+        self.m_per_class = m_per_class
+        self.batch_size = batch_size
+        self.labels = np.array(labels)
+        self.labels_unique = np.unique(labels)
+        self.length_before_new_iter = length_before_new_iter
+
+        # dict: {label1: [idx1, idx2...], label2: [idx...]}
+        self.label_to_indices = {label: np.where(self.labels == label)[0] 
+                                 for label in self.labels_unique}
+        
+        self.n_samples = len(labels) 
+        if batch_size is not None:
+             assert batch_size % m_per_class == 0, \
+                f"Batch size ({batch_size}) must be divisible by m_per_class ({m_per_class})"
+
+    def __len__(self):
+        return self.n_samples
+
+    def __iter__(self):
+        indices = []
+        
+        batch_pool_1 = [] 
+        batch_pool_2 = []
+        
+        valid_labels = list(self.label_to_indices.keys())
+        
+        for label in valid_labels:
+            idxs = np.copy(self.label_to_indices[label])
+            np.random.shuffle(idxs)
+            
+            chunk1 = idxs[:self.m_per_class]
+            chunk2 = idxs[self.m_per_class:]
+
+            batch_pool_1.append(chunk1)
+            batch_pool_2.append(chunk2)
+
+        np.random.shuffle(batch_pool_1)
+        np.random.shuffle(batch_pool_2)        
+        
+        for chunk in batch_pool_1:
+            indices.extend(chunk)
+            
+        for chunk in batch_pool_2:
+            indices.extend(chunk)
+            
+        return iter(indices)
+
+def ensure_path(path: str, is_file: bool = False):
+    if is_file:
+        dir_path = os.path.dirname(path)
+    else:
+        dir_path = path
+
+    if dir_path and not os.path.exists(dir_path):
+        os.makedirs(dir_path, exist_ok=True)
+    return
 
 class LinearWarmupScheduler:
     def __init__(self, optimizer, warmup_steps):
@@ -62,6 +147,13 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
+def l1norm(feas):
+    return F.normalize(feas, p = 1, dim = -1)
+
+
+def l2norm(feas):
+    return F.normalize(feas, p = 2, dim = -1)
+    
 
 def minmaxscaler(data):
     min_val = torch.min(data, dim=1, keepdim=True)[0]
@@ -164,3 +256,4 @@ def setup_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False

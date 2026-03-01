@@ -62,12 +62,10 @@ class CLUB(nn.Module):  # CLUB: Mutual Information Contrastive Learning Upper Bo
 
 
 class CLUBSample(nn.Module):  # Sampled version of the CLUB estimator
-    # x_dim 512 y_dim 256
+    # x_dim 512 y_dim 512
     def __init__(self, x_dim, y_dim, hidden_size):
         super(CLUBSample, self).__init__()
         self.p_mu = nn.Sequential(nn.Linear(x_dim, hidden_size),
-                                  nn.ReLU(),
-                                  nn.Linear(hidden_size, hidden_size),
                                   nn.ReLU(),
                                   nn.Linear(hidden_size, hidden_size),
                                   nn.ReLU(),
@@ -77,10 +75,9 @@ class CLUBSample(nn.Module):  # Sampled version of the CLUB estimator
                                        nn.ReLU(),
                                        nn.Linear(hidden_size, hidden_size),
                                        nn.ReLU(),
-                                       nn.Linear(hidden_size, hidden_size),
-                                       nn.ReLU(),
                                        nn.Linear(hidden_size, y_dim),
                                        nn.Tanh())
+
 
     def get_mu_logvar(self, x_samples):
         mu = self.p_mu(x_samples)
@@ -90,7 +87,7 @@ class CLUBSample(nn.Module):  # Sampled version of the CLUB estimator
         
     def loglikeli(self, x_samples, y_samples):
         mu, logvar = self.get_mu_logvar(x_samples)
-        return (-(mu - y_samples)**2 /logvar.exp()-logvar).mean() #.sum(dim=1).mean(dim=0)
+        return (-(mu - y_samples)**2 /logvar.exp()-logvar).sum(dim=1).mean(dim=0) / 2.
     
 
     def forward(self, x_samples, y_samples):
@@ -107,6 +104,158 @@ class CLUBSample(nn.Module):  # Sampled version of the CLUB estimator
 
     def learning_loss(self, x_samples, y_samples):
         return - self.loglikeli(x_samples, y_samples)
+
+
+class CLUBSample_CO_Estimate(nn.Module):
+    # x_dim 512 y_dim 512
+    def __init__(self, x_dim, y_dim, hidden_size, lambda_dml=1.0):
+        super(CLUBSample_CO_Estimate, self).__init__()
+
+        self.p_mu_A = nn.Sequential(
+            nn.Linear(x_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, y_dim)
+        )
+        self.p_logvar_A = nn.Sequential(
+            nn.Linear(x_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, y_dim),
+            nn.Tanh()
+        )
+
+        self.p_mu_B = nn.Sequential(
+            nn.Linear(x_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, y_dim)
+        )
+        self.p_logvar_B = nn.Sequential(
+            nn.Linear(x_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, y_dim),
+            nn.Tanh()
+        )
+
+        self.active_head = 'A'           
+        self.lambda_dml = float(lambda_dml)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        def init_weights_A(m):
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
+        self.p_mu_A.apply(init_weights_A)
+        self.p_logvar_A.apply(init_weights_A)
+
+        def init_weights_B(m):
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain('relu'))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0) 
+
+        self.p_mu_B.apply(init_weights_B)
+        self.p_logvar_B.apply(init_weights_B)
+
+
+    def get_mu_logvar_A(self, x_samples):
+        mu_A = self.p_mu_A(x_samples)
+        logvar_A = self.p_logvar_A(x_samples)
+        return mu_A, logvar_A
+
+
+    def get_mu_logvar_B(self, x_samples):
+        mu_B = self.p_mu_B(x_samples)
+        logvar_B = self.p_logvar_B(x_samples)
+        return mu_B, logvar_B
+
+
+    def get_mu_logvar(self, x_samples):
+        if self.active_head == 'A':
+            return self.get_mu_logvar_A(x_samples)
+        else:
+            return self.get_mu_logvar_B(x_samples)
+
+    def use_head(self, head: str):
+        self.active_head = 'A' if head == 'A' else 'B'
+
+
+    @staticmethod
+    def gaussian_kl(mu1, logvar1, mu2, logvar2):
+        var1 = torch.exp(logvar1)
+        var2 = torch.exp(logvar2)
+
+        kl = 0.5 * ( (logvar2 - logvar1) + (var1 + (mu1 - mu2)**2) / var2 - 1.0)
+        return kl.sum(dim=-1).mean()
+
+    def dml_symmetric_kl(self, x_samples):
+        mu_A, logvar_A = self.get_mu_logvar_A(x_samples)
+        mu_B, logvar_B = self.get_mu_logvar_B(x_samples)
+        return self.gaussian_kl(mu_A, logvar_A, mu_B, logvar_B) + \
+               self.gaussian_kl(mu_B, logvar_B, mu_A, logvar_A)
+
+
+    def loglikeli_A(self, x_samples, y_samples):
+        mu_A, logvar_A = self.get_mu_logvar_A(x_samples)
+        return (-(mu_A - y_samples)**2 / logvar_A.exp() - logvar_A).sum(dim=1).mean(dim=0) / 2.
+
+    def loglikeli_B(self, x_samples, y_samples):
+        mu_B, logvar_B = self.get_mu_logvar_B(x_samples)
+        return (-(mu_B - y_samples)**2 / logvar_B.exp() - logvar_B).sum(dim=1).mean(dim=0) / 2.
+
+    def forward_A(self, x_samples, y_samples):
+        mu_A, logvar_A = self.get_mu_logvar_A(x_samples)
+        sample_size = x_samples.shape[0]
+        random_index = torch.randperm(sample_size).long()
+        positive = - (mu_A - y_samples)**2 / logvar_A.exp()
+        negative = - (mu_A - y_samples[random_index])**2 / logvar_A.exp()
+        upper_bound = (positive.sum(dim=-1) - negative.sum(dim=-1)).mean()
+        return upper_bound / 2.
+
+    def forward_B(self, x_samples, y_samples):
+        mu_B, logvar_B = self.get_mu_logvar_B(x_samples)
+        sample_size = x_samples.shape[0]
+        random_index = torch.randperm(sample_size).long()
+        positive = - (mu_B - y_samples)**2 / logvar_B.exp()
+        negative = - (mu_B - y_samples[random_index])**2 / logvar_B.exp()
+        upper_bound = (positive.sum(dim=-1) - negative.sum(dim=-1)).mean()
+        return upper_bound / 2.
+
+
+    def loglikeli(self, x_samples, y_samples):
+        mu, logvar = self.get_mu_logvar(x_samples)
+        return (-(mu - y_samples)**2 / logvar.exp() - logvar).sum(dim=1).mean(dim=0) / 2.
+
+    def forward(self, x_samples, y_samples):
+        return 0.5 * (self.forward_A(x_samples, y_samples) +
+                      self.forward_B(x_samples, y_samples))
+
+    # def forward(self, x_samples, y_samples):
+    #     mi_A = self.forward_A(x_samples, y_samples)
+    #     mi_B = self.forward_B(x_samples, y_samples)
+        
+    #     # For training stability.
+    #     eps = 1e-4
+    #     mi_A = torch.clamp_min(mi_A, eps)
+    #     mi_B = torch.clamp_min(mi_B, eps)
+
+    #     return 0.5 * (mi_A + mi_B)
+
+    def learning_loss(self, x_samples, y_samples):
+        loss_A = - self.loglikeli_A(x_samples, y_samples)  # maximize -> add minus
+        loss_B = - self.loglikeli_B(x_samples, y_samples)
+        dml = self.dml_symmetric_kl(x_samples)             # minimize
+        return loss_A + loss_B + self.lambda_dml * dml
 
 
 class ConLoss(nn.Module):
@@ -318,38 +467,6 @@ class Geometry_Gaps(nn.Module):
         return geo_loss
 
 
-def cal_dis_var(image_features, eeg_features, labels):
-        '''
-        Input: L2 Norm feauture, image_features, eeg_features
-        '''
-        device = torch.device('cuda') if image_features.is_cuda else torch.device('cpu')
-        batch_size = image_features.shape[0]
-        labels = labels.contiguous().view(-1, 1)
-        mask = torch.eq(labels, labels.t()).float().to(device)            
-        # eye = torch.eye(batch_size).to(device)
-        # inverse_eye = 1 - eye
-
-        # modality gap
-        # Euclidean distance
-        dis_matrix = torch.cdist(image_features, eeg_features, p=2)# .pow(2)
-
-        same_class_distances = []
-        for i in range(mask.shape[0]):
-            # Use a mask to select the distance values of samples from the same category in the current row
-            distances = dis_matrix[i][mask[i] == 1]
-            # Add to the list
-            if distances.numel() > 1:
-                same_class_distances.append(distances)
-        
-        variances = []
-        for distances in same_class_distances:
-            variance = torch.var(distances, unbiased=True)
-            variances.append(variance)
-        variances_tensor = torch.tensor(variances)
-
-        return torch.mean(variances_tensor)
-
-
 class Intra_Geometry_Variance(nn.Module):
     # Distance variance regularization.
     def __init__(self):
@@ -384,4 +501,225 @@ class Intra_Geometry_Variance(nn.Module):
 
         geo_loss = torch.sum(cls_variance) / non_zero
         return geo_loss
+
+
+
+# new
+class Geometry_Variance_New(nn.Module):
+    def __init__(self, distance_type: str = "euclidean", eps: float = 1e-6):
+        super().__init__()
+        self.distance_type = distance_type.lower()
+        self.eps = eps
+
+    def _compute_distance(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """
+        A: [U, D]   Prototype
+        B: [B, D]   feature
+        return: [U, B]  dist matrix
+        """
+        if self.distance_type == "cosine":
+            sim = A @ B.t()                     
+            dist = 1.0 - sim                    
+        elif self.distance_type == "euclidean":
+            dist = torch.cdist(A, B, p=2)       
+        elif self.distance_type == "l1":
+            dist = torch.cdist(A, B, p=1)             
+        else:
+            raise ValueError(f"Unsupported distance_type: {self.distance_type}")
+        return dist
+
+    def forward(self, image_features: torch.Tensor,
+                      labels: torch.Tensor,
+                      eeg_prototypes: torch.Tensor) -> torch.Tensor:
+
+        device = image_features.device
+        unique_label = labels.unique(sorted=True)
+        Cb = eeg_prototypes[unique_label.long()]  # [U, D]
+
+        mask = (labels.unsqueeze(0) == unique_label.unsqueeze(1)).float()
+
+        cnt = mask.sum(dim=1)
+        valid_cls_mask = (cnt >= 2)
+
+        if not valid_cls_mask.any():
+            return torch.tensor(0.0, device=device)
+        
+        # MSE
+        dist_matrix = self._compute_distance(Cb, image_features)  # [U, B]
+        dist_sum = (dist_matrix * mask).sum(dim=1)
+        cls_means = dist_sum / (cnt + self.eps)
+        
+        target_radius = cls_means.detach()
+        diff = dist_matrix - target_radius.unsqueeze(1)
+        sq_diff = (diff ** 2) * mask
+        
+        cls_variances = sq_diff.sum(dim=1) / (cnt + self.eps)
+        valid_variances = cls_variances[valid_cls_mask]
+
+        return valid_variances.mean()
+
+
+class Geometry_Gaps_Consistency(nn.Module):
+    def __init__(self, distance_type: str = "cosine", eps: float = 1e-6):
+        super().__init__()
+        self.distance_type = distance_type.lower()
+        self.eps = eps
+
+    def _compute_distance(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """
+        A: [U, D]   Prototype
+        B: [B, D]   feature
+        return: [U, B]  dist matrix
+        """
+        if self.distance_type == "cosine":
+            sim = A @ B.t()                     
+            dist = 1.0 - sim                    
+        elif self.distance_type == "euclidean":
+            dist = torch.cdist(A, B, p=2)       
+        elif self.distance_type == "l1":
+            dist = torch.cdist(A, B, p=1)             
+        else:
+            raise ValueError(f"Unsupported distance_type: {self.distance_type}")
+        return dist
+
+    def forward(self, semantic_features: torch.Tensor,
+                      labels: torch.Tensor,
+                      semantic_prototypes: torch.Tensor) -> torch.Tensor:
+
+        device = semantic_features.device
+        unique_label = labels.unique(sorted=True)
+        Cb = semantic_prototypes[unique_label.long()] 
+
+        mask = (labels.unsqueeze(0) == unique_label.unsqueeze(1)).float()
+        
+        dist_matrix = self._compute_distance(Cb, semantic_features)  # [U, B]
+        
+        sum_dist_per_class = (dist_matrix * mask).sum(dim=1)
+        
+        counts = mask.sum(dim=1)
+        mean_dist_per_class = sum_dist_per_class / counts
+        loss_gaps = mean_dist_per_class.mean()
+
+        return loss_gaps
+
+
+class Geometry_Std_Consistency(nn.Module): # 
+    def __init__(self, distance_type: str = "cosine", eps: float = 1e-6):
+        super().__init__()
+        self.distance_type = distance_type.lower()
+        self.eps = eps
+
+    def _compute_distance(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """
+        A: [U, D]   Prototype
+        B: [B, D]   feature
+        return: [U, B]  dist matrix
+        """
+        if self.distance_type == "cosine":
+            sim = A @ B.t()                     
+            dist = 1.0 - sim                    
+        elif self.distance_type == "euclidean":
+            dist = torch.cdist(A, B, p=2)       
+        elif self.distance_type == "l1":
+            dist = torch.cdist(A, B, p=1)             
+        else:
+            raise ValueError(f"Unsupported distance_type: {self.distance_type}")
+        return dist
+
+    def forward(self, semantic_features: torch.Tensor,
+                      labels: torch.Tensor,
+                      semantic_prototypes: torch.Tensor) -> torch.Tensor:
+
+        device = semantic_features.device
+        unique_label = labels.unique(sorted=True)
+        Cb = semantic_prototypes[unique_label.long()]  # [U, D]
+
+        mask = (labels.unsqueeze(0) == unique_label.unsqueeze(1)).float()
+
+        cnt = mask.sum(dim=1)
+        valid_cls_mask = (cnt >= 2)
+
+        if not valid_cls_mask.any():
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        dist_matrix = self._compute_distance(Cb, semantic_features)  # [U, B]
+        dist_sum = (dist_matrix * mask).sum(dim=1)
+        cls_means = dist_sum / cnt
+        
+        target_radius = cls_means.detach()
+        diff = dist_matrix - target_radius.unsqueeze(1)
+        sq_diff = (diff ** 2) * mask
+
+        cls_variances = sq_diff.sum(dim=1) / cnt
+        
+        # Variance -> Standard Deviation
+        cls_stds = torch.sqrt(cls_variances + self.eps)
+        valid_stds = cls_stds[valid_cls_mask]
+
+        return valid_stds.mean()
+
+
+class Geometry_Mean_Std_Consistency(nn.Module):
+    def __init__(self, distance_type: str = "cosine", lambda_std: float = 1.0, eps: float = 1e-6):
+        super().__init__()
+        self.distance_type = distance_type.lower()
+        self.lambda_std = lambda_std
+        self.eps = eps
+
+
+    def _compute_distance(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """
+        A: [U, D]   Prototypes
+        B: [B, D]   Features
+        return: [U, B] dist matrix
+        """
+        if self.distance_type == "cosine":
+            sim = A @ B.t()
+            dist = 1.0 - sim                    
+        elif self.distance_type == "euclidean":
+            dist = torch.cdist(A, B, p=2)       
+        elif self.distance_type == "l1":
+            dist = torch.cdist(A, B, p=1)             
+        else:
+            raise ValueError(f"Unsupported distance_type: {self.distance_type}")
+        return dist
+
+
+    def forward(self, semantic_features: torch.Tensor,
+                      labels: torch.Tensor,
+                      semantic_prototypes: torch.Tensor) -> torch.Tensor:
+        
+        device = semantic_features.device
+        unique_label = labels.unique(sorted=True)
+        Cb = semantic_prototypes[unique_label.long()] 
+        
+        mask = (labels.unsqueeze(0) == unique_label.unsqueeze(1)).float()
+        dist_matrix = self._compute_distance(Cb, semantic_features)
+        
+        counts = mask.sum(dim=1)
+
+        valid_class_mask = (counts >= 2).float()
+        num_valid_classes = valid_class_mask.sum()
+        
+        if num_valid_classes == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        # sum_dist: [U]
+        sum_dist_per_class = (dist_matrix * mask).sum(dim=1)
+        mean_dist_per_class = sum_dist_per_class / (counts)
+        
+        # mu : [U, 1]
+        mu_expanded = mean_dist_per_class.detach().unsqueeze(1)
+        diff_sq = ((dist_matrix - mu_expanded) * mask) ** 2
+        
+        # Variance/Std : [U]
+        var_per_class = diff_sq.sum(dim=1) / (counts)
+        std_per_class = torch.sqrt(var_per_class + self.eps)
+        
+        loss_mean = (mean_dist_per_class * valid_class_mask).sum() / num_valid_classes
+        loss_std = (std_per_class * valid_class_mask).sum() / num_valid_classes
+        
+        print(f"Valid Classes: {int(num_valid_classes.item())}/{len(unique_label)}, "
+              f"Mean Loss: {loss_mean.item():.4f}, Std Loss: {loss_std.item():.4f}")
+        return loss_mean + self.lambda_std * loss_std
 
