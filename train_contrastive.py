@@ -1,5 +1,6 @@
 import os
 import csv
+import copy
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -9,12 +10,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
-from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from utils.datasets import *
-from utils.loss import CLUBSample, ConLoss, SupConLoss, Geometry_Variance
+from utils.util import *
+from utils.loss import ConLoss, SupConLoss, Geometry_Gaps_Consistency
 from utils.loops_contrastive import train, test 
-from utils.util import save_checkpoint, setLogger, WandbLogger, setup_seed
 from config import parse_args
 from einops import rearrange
 
@@ -23,11 +24,8 @@ from models import visual
 from models import modules
 
 # set cuda
-gpus = [0]
-os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, gpus))
 if torch.cuda.is_available():
-    device = torch.device('cuda')
-    cudnn.deterministic = True
+    device = torch.device('cuda:0')
 else:
     device = torch.device('cpu')
     gpu_index = -1 
@@ -40,87 +38,70 @@ class VE_SID():
         self.batch_size_val = 200
         self.batch_size_test = 200
 
-        self.eeg_data_path =  '/chz/data/Things-EEG/Preprocessed_data_250Hz/'
+        self.eeg_data_path =  '/chz/data/VISUALEEG/Things-EEG/Preprocessed_data_250Hz/'
         self.image_data_path = './image_features/'
-        # EEG feature dim: 1440 , Image feature dim : 1024
-        self.eeg_feature_dim = 1440
+        # EEG feature dim: 1024 , Image feature dim : 1024
+        self.eeg_feature_dim = 1024
         self.image_feature_dim = 1024
 
         # model
-        self.EEG_Net = eeg.EEG_Net_Con(self.opt).to(device)
         self.Visual_Net = visual.Visual_Con(self.opt).to(device)
+        self.EEG_Net = eeg.EEG_Net_Con(self.opt).to(device)
         self.modules = nn.ModuleList([self.Visual_Net, self.EEG_Net])
         
         # criterion
-        if opt.main_loss == 'conloss':
-            self.main_loss = ConLoss()
-        elif opt.main_loss == 'supconloss':
-            self.main_loss = SupConLoss()
-        
+        if opt.main_loss == 'conloss': self.main_loss = ConLoss()
+        elif opt.main_loss == 'supconloss': self.main_loss = SupConLoss()
+
         if opt.geo_loss:
-            self.geoloss1 = Geometry_Variance()
-            self.criterions = [self.main_loss, self.geoloss1]
-            geo_info = f'geovar_{self.opt.lambda1}'
+            self.geoloss = Geometry_Gaps_Consistency(self.opt.geo_loss_dis)
+            self.criterions = [self.main_loss, self.geoloss]
+            geo_info = f'geogaps_last{self.opt.geo_last_epochs}epochs_{self.opt.geo_loss_dis}_{self.opt.lambda1}'
         else: 
             self.criterions = [self.main_loss]
             geo_info = f''
 
-        # optimizers
-        self.net_optim = optim.AdamW(self.modules.parameters(), lr=self.opt.lr, betas=(0.9,0.98))
+        self.net_optim = optim.AdamW(self.modules.parameters(), lr=self.opt.lr)
         self.optimizers = [self.net_optim]
 
-        self.save_model_path = f'./saves/checkpoints/Contrastive_Sub{format(self.nSub, "02")}_{self.opt.main_loss}_{geo_info}/'
-        if not os.path.exists(self.save_model_path): os.makedirs(self.save_model_path)
-        self.results_path = f'./saves/results/Contrastive_Sub{format(self.nSub, "02")}_{self.opt.main_loss}_{geo_info}/'
-        if not os.path.exists(self.results_path): os.makedirs(self.results_path)
+        run_session = f"Contrastive_{self.opt.exp_setting}_{self.opt.main_loss}_lr{self.opt.lr}_seed{self.opt.seed}_train_epochs_{self.opt.train_epochs}_{geo_info}"
+        run_name = f'Contrastive_Sub{format(self.nSub, "02")}'
+        self.save_model_path = f'./saves/checkpoints/{run_session}/{run_name}/'; ensure_path(self.save_model_path)
+        self.results_path = f'./saves/results/{run_session}/{run_name}/'; ensure_path(self.results_path)
 
         # logger
         self.logger = setLogger(os.path.join(self.results_path, f'sub_{format(self.nSub, "02")}_logs'))
-        self.wandblogger = WandbLogger("VE-SID", f'Contrastive_Sub{format(self.nSub, "02")}_{self.opt.main_loss}_{geo_info}', self.opt)
-        self.wandblogger.initialize()
+        self.logger.info("================= Options ===================")
+        for k, v in vars(self.opt).items(): self.logger.info(f'{str(k):<25}: {str(v)}')
+        self.logger.info("=============================================")
+        # self.wandblogger = WandbLogger("VE-SID-MR-2026", run_name, self.opt)
+        # self.wandblogger.initialize()
 
 
-    def initial_EEG_prototype(self):  
-        eeg_datasets_path = os.path.join(self.eeg_data_path, 'sub-'+format(self.nSub, '02'), 'preprocessed_eeg_training.npy')
-        eeg_datasets = np.load(eeg_datasets_path, allow_pickle=True)['preprocessed_eeg_data']
-        eeg_datasets = np.mean(eeg_datasets, axis = 1)        
-        eeg_datasets = torch.from_numpy(eeg_datasets).float().to(device)
-        #(16540 63 250) 
-        print(eeg_datasets.shape)
-        batch_size = 40
-        eeg_prototype_list = []
-        self.EEG_Net.eval()
-        with torch.no_grad():
-            for i in range(0, len(eeg_datasets), batch_size):
-                batch_eegs = eeg_datasets[i : i + batch_size]
-                batch_eegs_features = self.EEG_Net(batch_eegs)
-                eeg_prototype_list.append(batch_eegs_features)
-            
-        eeg_prototypes = torch.cat(eeg_prototype_list, dim = 0)
-        print("eeg_prototypes tensor features shape", eeg_prototypes.shape)
-        eeg_prototypes = rearrange(eeg_prototypes, '(b h) f -> b h f', h = 10)
-        eeg_prototypes = eeg_prototypes.mean(dim = 1)
-        # print("eeg_prototypes shape2", eeg_prototypes.shape)
-        eeg_prototypes = eeg_prototypes / eeg_prototypes.norm(dim = -1, keepdim=True)
-        self.EEG_Net.register_buffer('eeg_prototypes', eeg_prototypes)
-        # self.EEG_Net.eeg_prototypes.copy_(eeg_prototypes)
-        # del eeg_datasets, eeg_prototype_list, eeg_prototypes
-        print(f"The shape of EEG prototypes: {self.EEG_Net.eeg_prototypes.shape}")
-
-    
     def get_datasets(self):
-        image_eeg_pairs_train = get_image_eeg_pair_Rep(self.image_data_path, self.eeg_data_path, sub=format(self.nSub, '02'))
-        train_datasets = TrainDataset(image_eeg_pairs_train)
-        test_img_feature, test_eeg = get_test_eeg_Rep(self.image_data_path, self.eeg_data_path, sub=format(self.nSub, '02'))
-        test_datasets = TestDataset(test_eeg)
+        if self.opt.exp_setting == 'intra-subject':
+            image_eeg_pairs_train, test_img_feature, test_eeg =  get_train_test_datasets(self.image_data_path, self.eeg_data_path, sub=format(self.nSub, '02'))
+            train_datasets = TrainDataset(image_eeg_pairs_train)
+            test_datasets = TestDataset(test_eeg)
 
-        trainloader = torch.utils.data.DataLoader(train_datasets, batch_size = self.opt.batch_size, shuffle = True)
-        testloader = torch.utils.data.DataLoader(test_datasets, batch_size = self.batch_size_test, shuffle = False)
+            trainloader = torch.utils.data.DataLoader(train_datasets, batch_size = self.opt.batch_size, num_workers=8, shuffle = True)
+            testloader = torch.utils.data.DataLoader(test_datasets, batch_size = self.batch_size_test, shuffle = False)
 
-        return train_datasets, test_datasets, trainloader, testloader, test_img_feature
+            return train_datasets, test_datasets, trainloader, testloader, test_img_feature
+        elif self.opt.exp_setting == 'inter-subject':
+            train_image_eeg_pairs, val_eeg, test_img_feature, test_eeg = get_train_val_test_datasets_LOSO(self.image_data_path, self.eeg_data_path, sub=format(self.nSub, '02'))
+            train_datasets = TrainDataset(train_image_eeg_pairs)
+            val_datasets = TestDataset(val_eeg)
+            test_datasets = TestDataset(test_eeg)
 
-    def loops(self):
+            trainloader = torch.utils.data.DataLoader(train_datasets, batch_size = self.opt.batch_size, num_workers=8, shuffle = True)
+            valloader = torch.utils.data.DataLoader(val_datasets, batch_size = self.batch_size_val, shuffle = False)
+            testloader = torch.utils.data.DataLoader(test_datasets, batch_size = self.batch_size_test, shuffle = False)
+            
+            return train_datasets, val_datasets, test_datasets, trainloader, valloader, testloader, test_img_feature
 
+
+    def loops_intra_subject(self):
         train_datasets, test_datasets, trainloader, testloader, test_img_feature = self.get_datasets()
         print(f"The number of train_datasets: {len(train_datasets)}. The number of test_datasets: {len(test_datasets)}")
         print(f"The dimension of visual feature: {train_datasets[0][0].shape}, The dimension of eeg feature: {train_datasets[0][1].shape}")
@@ -129,26 +110,41 @@ class VE_SID():
         self.logger.info(f"The dimension of visual feature: {train_datasets[0][0].shape}, The dimension of eeg feature: {train_datasets[0][1].shape}")
         self.logger.info(f"The concept shape of test image feature {test_img_feature.shape}")
         test_img_feature = test_img_feature.to(device)
-        
-        results = []
-        model_dict = {}
-        best_record = {}
-        best_record['test_top1_acc'] = 0
-        for epoch in range(1, self.opt.train_epochs + 1): 
-            print(f"This is training phase, Epoch : {epoch}, learning_rate : {self.optimizers[0].param_groups[0]['lr']}")
-            train_conloss, dis_var = train(epoch, device, trainloader, self.modules, self.criterions, self.optimizers, self.opt)
-            test_top1_acc, test_top5_acc = test(epoch, device, testloader, test_img_feature, self.modules, self.opt)
-            
-            if (epoch + 1) % 10 == 0:
-                model_dict['EEG_Net'] = self.EEG_Net.state_dict()
-                model_dict['Viusal_Net'] = self.Visual_Net.state_dict()
-                save_checkpoint(model_dict, self.save_model_path, f'models_checkpoints_{epoch + 1}.pth')
 
-            if test_top1_acc > best_record['test_top1_acc']:
-                best_record['test_top1_acc'] = test_top1_acc
-                best_record['test_top5_acc'] = test_top5_acc
-                best_record['epoch'] = epoch
-                best_record['lr'] = self.optimizers[0].param_groups[0]['lr']
+
+        results = []
+        ckpt_state = {
+            'loss': float('inf'),  
+            'epoch': None,
+            'lr': None,
+            'EEG_Net': None,
+            'Visual_Net': None
+        }
+        for epoch in range(1, self.opt.train_epochs + 1): 
+            current_lr = self.optimizers[0].param_groups[0]['lr']
+            print(f"This is training phase, Epoch : {epoch}, learning_rate : {current_lr}")
+            train_conloss, geo_loss = train(epoch, device, trainloader, self.modules, self.criterions, self.optimizers, self.opt)
+            test_top1_acc, test_top5_acc = test(epoch, device, testloader, test_img_feature, self.modules, self.opt)
+
+            # if (epoch + 1) % 10 == 0:
+            #     save_checkpoint({
+            #         'EEG_Net': self.EEG_Net.state_dict(),
+            #         'Visual_Net': self.Visual_Net.state_dict()
+            #     }, self.save_model_path, f'models_checkpoints_{epoch + 1}.pth')
+
+            if train_conloss < ckpt_state['loss']:
+                ckpt_state['loss'] = train_conloss
+                ckpt_state['epoch'] = epoch
+                ckpt_state['lr'] = current_lr
+
+                ckpt_state['EEG_Net'] = copy.deepcopy(self.EEG_Net.state_dict())
+                ckpt_state['Visual_Net'] = copy.deepcopy(self.Visual_Net.state_dict())
+
+                save_checkpoint(
+                    ckpt_state,
+                    self.save_model_path,
+                    f'ckpt_best_trainconloss.pth'
+                )
 
             epoch_results = {
                 "epoch": epoch,
@@ -159,33 +155,152 @@ class VE_SID():
 
             results.append(epoch_results)
 
-            self.wandblogger.log_metrics(test_acc1 = test_top1_acc, test_acc5 = test_top5_acc, train_conloss = train_conloss)
-            self.logger.info(f"Subject {self.nSub} : Epoch {epoch}, test_acc1 :{test_top1_acc}, test_acc5:{test_top5_acc}, train_conloss = {train_conloss}")
-        self.logger.info(f"* Subject {self.nSub} The best test Top1 acc is {best_record['test_top1_acc']}; Top5 acc is {best_record['test_top5_acc']}, epoch is {best_record['epoch']}")
+            # self.wandblogger.log_metrics(test_acc1 = test_top1_acc, test_acc5 = test_top5_acc, train_conloss = train_conloss, geo_loss = geo_loss)
+            self.logger.info(f"Subject {self.nSub} : Epoch {epoch}, test_acc1 :{test_top1_acc}, test_acc5:{test_top5_acc}, train_conloss = {train_conloss}, geo_loss = {geo_loss}")
+        
+        # Test
+        if ckpt_state['EEG_Net'] is not None and ckpt_state['Visual_Net'] is not None:
+            self.EEG_Net.load_state_dict(ckpt_state['EEG_Net'])
+            self.Visual_Net.load_state_dict(ckpt_state['Visual_Net'])
+
+            test_top1_acc, test_top5_acc = test(ckpt_state['epoch'], device, testloader, test_img_feature, self.modules, self.opt)
+
+            print(f"[Test Results] Using best-train-loss weights from epoch {ckpt_state['epoch']}; \
+                Test top-1: {test_top1_acc}, Test top-5: {test_top5_acc}")
+            self.logger.info(f"Subject {self.nSub} : Test results test_top_acc1 :{test_top1_acc}, test_top_acc5:{test_top5_acc}")
+            
+            results.append({
+                "best_epoch": ckpt_state['epoch'],
+                "best_train_conloss": ckpt_state['loss'],
+                "top1_acc_results": test_top1_acc,
+                "top5_acc_results": test_top5_acc,
+            })
+        else:
+            raise ValueError("No best-train-loss state captured")
+            
+        
         self.logger.handlers.clear()
-        self.wandblogger.finish()
+        # self.wandblogger.finish()
 
         # Save results to a CSV file
+        train_rows = results[:-1]
+        final_row  = results[-1]
+        fieldnames = list(train_rows[0].keys()) + list(final_row.keys())
+
         results_file = os.path.join(self.results_path, f'sub_{format(self.nSub, "02")}_result.csv')
         with open(results_file, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=results[0].keys())
+            writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
-            writer.writerows(results)
+            writer.writerows(train_rows)
+            writer.writerow(final_row)
         print(f'Results saved to {results_file}')
         return results
+    
+
+    def loops_inter_subject(self):
+        train_datasets, val_datasets, test_datasets, trainloader, valloader, testloader, test_img_feature = self.get_datasets()
+        print(f"The number of train_datasets: {len(train_datasets)}. The number of val_datasets: {len(val_datasets)}. The number of test_datasets: {len(test_datasets)}")
+        print(f"The dimension of visual feature: {train_datasets[0][0].shape}, The dimension of eeg feature: {train_datasets[0][1].shape}")
+        print(f"The concept shape of test image feature {test_img_feature.shape}")
+        self.logger.info(f"The number of train_datasets: {len(train_datasets)}. The number of val_datasets: {len(val_datasets)}. The number of test_datasets: {len(test_datasets)}")
+        self.logger.info(f"The dimension of visual feature: {train_datasets[0][0].shape}, The dimension of eeg feature: {train_datasets[0][1].shape}")
+        self.logger.info(f"The concept shape of test image feature {test_img_feature.shape}")
+        test_img_feature = test_img_feature.to(device)
+
+        results = []
+        ckpt_state = {
+            'train_conloss': float('inf'),  # 
+            'epoch': None,
+            'lr': None,
+            'EEG_Net': None,
+            'Visual_Net': None
+        }
+        
+        for epoch in range(1, self.opt.train_epochs + 1):
+            current_lr = self.optimizers[0].param_groups[0]['lr']
+            print(f"This is training phase, Epoch : {epoch}, learning_rate : {current_lr}")
+            train_conloss, geo_loss = train(epoch, device, trainloader, self.modules, self.criterions, self.optimizers, self.opt)
+            val_top1_acc, val_top5_acc = test(epoch, device, valloader, test_img_feature, self.modules, self.opt, phase='Validation')
+            test_top1_acc, test_top5_acc = test(epoch, device, testloader, test_img_feature, self.modules, self.opt, phase='Test')
+            
+            if train_conloss < ckpt_state['train_conloss']:
+                ckpt_state['train_conloss'] = train_conloss
+                ckpt_state['epoch'] = epoch
+                ckpt_state['lr'] = current_lr
+                ckpt_state['EEG_Net'] = copy.deepcopy(self.EEG_Net.state_dict())
+                ckpt_state['Visual_Net'] = copy.deepcopy(self.Visual_Net.state_dict())
+                
+                save_checkpoint(
+                    ckpt_state,
+                    self.save_model_path,
+                    f'ckpt_best_trainconloss.pth'
+                )
+            
+            epoch_results = {
+                "epoch": epoch,
+                "train_conloss": train_conloss,
+                "geo_loss": geo_loss,
+                "val_top1_acc": val_top1_acc,
+                "val_top5_acc": val_top5_acc,
+                "test_top1_acc": test_top1_acc,
+                "test_top5_acc": test_top5_acc,
+            }
+            results.append(epoch_results)
+
+            # self.wandblogger.log_metrics(train_conloss = train_conloss, geo_loss = geo_loss, val_acc1 = val_top1_acc, val_acc5 = val_top5_acc, test_acc1 = test_top1_acc, test_acc5 = test_top5_acc)
+            self.logger.info(f"Subject {self.nSub} : Epoch {epoch}, train_conloss = {train_conloss},  geo_loss = {geo_loss},  val_acc1: {val_top1_acc}, val_acc5: {val_top5_acc}, test_acc1: {test_top1_acc}, test_acc5: {test_top5_acc}")
+        
+        if ckpt_state['EEG_Net'] is not None and ckpt_state['Visual_Net'] is not None:
+            self.EEG_Net.load_state_dict(ckpt_state['EEG_Net'])
+            self.Visual_Net.load_state_dict(ckpt_state['Visual_Net'])
+
+            test_top1_acc, test_top5_acc = test(ckpt_state['epoch'], device, testloader, test_img_feature, self.modules, self.opt, phase='Final Test')
+            print(f"[Final Test Results] Using best-train-conloss weights from epoch {ckpt_state['epoch']} (train_conloss={ckpt_state['train_conloss']:.4f}); "
+                  f"Test top-1: {test_top1_acc}, Test top-5: {test_top5_acc}")
+            self.logger.info(f"Subject {self.nSub} : Test results (best train_conloss @ epoch {ckpt_state['epoch']}) test_top_acc1: {test_top1_acc}, test_top_acc5: {test_top5_acc}")
+            
+            results.append({
+                "best_epoch": ckpt_state['epoch'],
+                "best_train_conloss": ckpt_state['train_conloss'],
+                "top1_acc_results": test_top1_acc,
+                "top5_acc_results": test_top5_acc,
+            })
+        else:
+            raise ValueError("No best-train-conloss state captured")
+        
+        self.logger.handlers.clear()
+        # self.wandblogger.finish()
+        
+        # Save results to a CSV file
+        train_rows = results[:-1]
+        final_row = results[-1]
+        fieldnames = list(train_rows[0].keys()) + list(final_row.keys())
+        
+        results_file = os.path.join(self.results_path, f'sub_{format(self.nSub, "02")}_result.csv')
+        with open(results_file, 'w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(train_rows)
+            writer.writerow(final_row)
+        print(f'Results saved to {results_file}')
+        return results
+
+    def loops(self):
+        if self.opt.exp_setting == 'intra-subject':
+            return self.loops_intra_subject()
+        elif self.opt.exp_setting == 'inter-subject':
+            return self.loops_inter_subject()
+        else:
+            raise ValueError(f"Unknown exp_setting: {self.opt.exp_setting}. Expected 'intra-subject' or 'inter-subject'.")
 
 
 def main():
     opt = parse_args()
     num_sub = opt.num_sub
-    cal_num = 0
+    setup_seed(opt.seed)
     for i in range(1, num_sub + 1):
-        cal_num += 1
-        print(f'Subject {i}, Seed is {opt.seed}')
-        setup_seed(opt.seed)
         ie = VE_SID(opt, i)
-        results = ie.loops()
-
+        ie.loops()
 
 if __name__ == "__main__":
     main()
