@@ -11,6 +11,7 @@ You can quickly set up the required dependencies using the provided `env.yml` fi
 conda env create -f env.yml 
 # 2. Activate the environment
 conda activate BCI
+```
 
 ### Key Dependencies
 If you prefer to install the environment manually, the core dependencies are listed below for reference:
@@ -38,7 +39,8 @@ If you find the code useful please consider citing our paper:
   journal={arXiv preprint arXiv:2408.06788},
   year={2024}
 }
-``` -->
+``` 
+-->
 
 
 
