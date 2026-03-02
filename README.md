@@ -4,26 +4,31 @@
 
 
 
-# Environment
-- Python=3.10
-- torch=2.0.0
-
-
-# Run Code
-
+## Environment Setup
+You can quickly set up the required dependencies using the provided `env.yml` file.
 ```bash
-# for only contrastive learning
-python train_contrastive.py
-# contrastive learning + geometric loss
-python train_contrastive.py --geo-loss True --lambda1 0.5
+# 1. Create the virtual environment
+conda env create -f env.yml 
+# 2. Activate the environment
+conda activate BCI
 
-# similar commands for semantic decouple contrastive learning
-python train_decouple.py
-# decouple + geometric loss
-python train_decouple.py --geo-loss True --lambda1 0.5
-```
+### Key Dependencies
+If you prefer to install the environment manually, the core dependencies are listed below for reference:
+
+| Package | Version |
+| :--- | :--- |
+| **Python** | 3.10.14 |
+| **PyTorch** | 2.7.0 |
+| **Torchvision**| 0.22.0 |
+| **Transformers**| 4.56.0 |
+
+**Other requirements:** `braindecode`, `einops`, `numpy`.
 
 
+
+
+
+<!-- 
 ## Citation
 If you find the code useful please consider citing our paper:
 ```
@@ -33,7 +38,7 @@ If you find the code useful please consider citing our paper:
   journal={arXiv preprint arXiv:2408.06788},
   year={2024}
 }
-```
+``` -->
 
 
 
