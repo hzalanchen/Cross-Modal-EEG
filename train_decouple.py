@@ -207,25 +207,23 @@ class VE_SID():
 
         results = []
         ckpt_state = {
-            'val_top1_acc': 0.0, 
+            'train_conloss': float('inf'),  
             'epoch': None,
             'lr': None,
             'EEG_Net': None,
             'Visual_Net': None
         }
-        
+            
         for epoch in range(1, self.opt.train_epochs + 1):
             current_lr = self.optimizers[0].param_groups[0]['lr']
             print(f"This is training phase, Epoch : {epoch}, learning_rate : {current_lr}")
             train_conloss, geo_loss, v_miloss, e_miloss, v_recloss, e_recloss = train(epoch, device, trainloader, self.modules, self.criterions, self.optimizers, self.opt)
-            # Validation
             val_top1_acc, val_top5_acc = test(epoch, device, valloader, test_img_feature, self.modules, self.opt, phase='Validation')
-            # Test
             test_top1_acc, test_top5_acc = test(epoch, device, testloader, test_img_feature, self.modules, self.opt, phase='Test')
 
 
-            if val_top1_acc > ckpt_state['val_top1_acc']:
-                ckpt_state['val_top1_acc'] = val_top1_acc
+            if train_conloss < ckpt_state['train_conloss']:
+                ckpt_state['train_conloss'] = train_conloss
                 ckpt_state['epoch'] = epoch
                 ckpt_state['lr'] = current_lr
                 ckpt_state['EEG_Net'] = copy.deepcopy(self.EEG_Net.state_dict())
@@ -234,7 +232,7 @@ class VE_SID():
                 save_checkpoint(
                     ckpt_state,
                     self.save_model_path,
-                    f'ckpt_best_val_acc.pth'
+                    f'ckpt_best_train_conloss.pth'
                 )
             
             epoch_results = {
@@ -256,27 +254,26 @@ class VE_SID():
                              f"v_miloss: {v_miloss}, e_miloss: {e_miloss}, v_recloss: {v_recloss}, e_recloss: {e_recloss}, "
                              f"val_acc1: {val_top1_acc}, val_acc5: {val_top5_acc}, test_acc1: {test_top1_acc}, test_acc5: {test_top5_acc}")
         
-        # Final Test with best validation model
+        # Final Test with best train_conloss model
         if ckpt_state['EEG_Net'] is not None and ckpt_state['Visual_Net'] is not None:
             self.EEG_Net.load_state_dict(ckpt_state['EEG_Net'])
             self.Visual_Net.load_state_dict(ckpt_state['Visual_Net'])
 
             test_top1_acc, test_top5_acc = test(ckpt_state['epoch'], device, testloader, test_img_feature, self.modules, self.opt, phase='Final Test')
-            print(f"[Final Test Results] Using best-val-acc weights from epoch {ckpt_state['epoch']}; "
-                  f"Val top-1: {ckpt_state['val_top1_acc']}, Test top-1: {test_top1_acc}, Test top-5: {test_top5_acc}")
-            self.logger.info(f"Subject {self.nSub} : Test results test_top_acc1: {test_top1_acc}, test_top_acc5: {test_top5_acc}")
+            print(f"[Final Test Results] Using best-train-conloss weights from epoch {ckpt_state['epoch']} (train_conloss={ckpt_state['train_conloss']:.4f}); "
+                  f"Test top-1: {test_top1_acc}, Test top-5: {test_top5_acc}")
+            self.logger.info(f"Subject {self.nSub} : Test results (best train_conloss @ epoch {ckpt_state['epoch']}) test_top_acc1: {test_top1_acc}, test_top_acc5: {test_top5_acc}")
             
             results.append({
                 "best_epoch": ckpt_state['epoch'],
-                "best_val_top1_acc": ckpt_state['val_top1_acc'],
+                "best_train_conloss": ckpt_state['train_conloss'],
                 "top1_acc_results": test_top1_acc,
                 "top5_acc_results": test_top5_acc,
             })
         else:
-            raise ValueError("No best-val-acc state captured")
+            raise ValueError("No best-train-conloss state captured")
         
         self.logger.handlers.clear()
-        self.wandblogger.finish()
         
         # Save results to a CSV file
         train_rows = results[:-1]
