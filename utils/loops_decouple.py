@@ -76,7 +76,7 @@ def train(epoch, device, train_loader, module_list, criterions, optimizers, opt)
         image_hat = visual_recnet(image_d, eeg_s)
         eeg_hat = eeg_recnet(eeg_d, image_s)
 
-        image_hat = l2norm(image_hat); eeg_hat = l2norm(eeg_hat)
+        # image_hat = l2norm(image_hat); eeg_hat = l2norm(eeg_hat)
         target_img_feature = l2norm(image_feature).detach(); target_eeg_feature = l2norm(eeg_feauture).detach()
 
         visual_rec_loss = recloss(image_hat, target_img_feature)

@@ -91,7 +91,7 @@ class VE_SID():
             train_datasets = TrainDataset(image_eeg_pairs_train)
             test_datasets = TestDataset(test_eeg)
 
-            trainloader = torch.utils.data.DataLoader(train_datasets, batch_size=self.opt.batch_size, num_workers=8, shuffle=True)
+            trainloader = torch.utils.data.DataLoader(train_datasets, batch_size=self.opt.batch_size, num_workers=8, shuffle=True, drop_last=True)
             testloader = torch.utils.data.DataLoader(test_datasets, batch_size=self.batch_size_test, shuffle=False)
 
             return train_datasets, test_datasets, trainloader, testloader, test_img_feature
@@ -102,7 +102,7 @@ class VE_SID():
             val_datasets = TestDataset(val_eeg)
             test_datasets = TestDataset(test_eeg)
 
-            trainloader = torch.utils.data.DataLoader(train_datasets, batch_size=self.opt.batch_size, num_workers=8, shuffle=True)
+            trainloader = torch.utils.data.DataLoader(train_datasets, batch_size=self.opt.batch_size, num_workers=8, shuffle=True, drop_last=True)
             valloader = torch.utils.data.DataLoader(val_datasets, batch_size=self.batch_size_val, shuffle=False)
             testloader = torch.utils.data.DataLoader(test_datasets, batch_size=self.batch_size_test, shuffle=False)
             
